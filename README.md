@@ -64,8 +64,8 @@ Docker itself must be configured to start on boot
 
 All persistent data lives on the host via a bind mount:
 
-```
-${MLFLOW_DATA_DIR:-${HOME}/mlflow-data}
+```bash
+${MLFLOW_DATA_DIR: $XDG_DATA_HOME}
 ```
 
 Contents:
@@ -74,11 +74,7 @@ Contents:
 - `artifacts/` — models, plots, checkpoints
 - `pgdata/` — PostgreSQL data directory (if enabled)
 
-### Why `$HOME`
-- writable by normal users
-- portable across machines
-- works on Linux and Windows
-- avoids `/var/lib` permission issues
+s
 
 ---
 
@@ -107,40 +103,6 @@ docker compose --profile pg up -d
 
 ---
 
-## What is a Compose profile?
-
-A **profile** is an opt-in group of services.
-
-In this repo:
-- default → only `mlflow` runs (SQLite)
-- `pg` profile → `mlflow + postgres` run
-
-This avoids maintaining multiple compose files.
-
----
-
-## Security model (important)
-
-### PostgreSQL credentials
-Postgres credentials are:
-
-- used **only between containers**
-- irrelevant for security **unless Postgres is exposed**
-- internal plumbing, not user-facing secrets
-
-By default:
-- PostgreSQL has **no published ports**
-- it is unreachable from LAN/WAN
-- only MLflow can connect
-
-> The real security boundary is **network isolation**, not the password.
-
-If you expose Postgres (`ports: 5432:5432`):
-- credentials become real security credentials
-- TLS, strong passwords, and access control matter
-
----
-
 ## Configuration files
 
 ### `docker-compose.yml`
@@ -155,12 +117,7 @@ If you expose Postgres (`ports: 5432:5432`):
 ### `.env`
 - per-machine
 - contains real values
-- **must NOT be committed**
-
-Add to `.gitignore`:
-```
-.env
-```
+- **must remain private for security**
 
 ---
 
