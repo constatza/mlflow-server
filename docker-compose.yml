@@ -1,0 +1,104 @@
+# docker-compose.yml
+#
+# Final (works with EMPTY .env):
+# - Safe defaults: localhost-only via MLflow 3.x security middleware
+# - Optional widening via .env (MLFLOW_ALLOWED_HOSTS / MLFLOW_CORS_ALLOWED_ORIGINS)
+# - SQLite backend + local artifacts under /data by default
+# - Optional Postgres via profile "pg"
+# - Hourly GC (MLflow 3.9+ requires both tracking-uri and backend-store-uri for gc)
+#
+# Notes:
+# - Compose substitutes ${VARS} from host env/.env BEFORE anchors expand.
+#   So for values used in `command:`, keep ${VAR:-default} there as well.
+# - Use $$VAR only inside shell scripts (e.g. in mlflow-gc), not in exec-form commands.
+
+x-mlflow-data-volume: &mlflow_data_volume
+  - "${MLFLOW_DATA_DIR:-${HOME}/mlflow-data}:/data"
+
+x-restart-policy: &restart_policy
+  restart: unless-stopped
+
+x-mlflow-default-env: &mlflow_default_env
+  # Storage defaults (available inside containers)
+  MLFLOW_BACKEND_URI: "${MLFLOW_BACKEND_URI:-sqlite:////data/mlflow.db}"
+  MLFLOW_ARTIFACT_ROOT: "${MLFLOW_ARTIFACT_ROOT:-file:/data/artifacts}"
+
+
+services:
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:latest
+    restart: unless-stopped
+    volumes:
+      - "${MLFLOW_DATA_DIR:-${HOME}/mlflow-data}:/data"
+    ports:
+      - "${MLFLOW_PORT:-5000}:5000"
+    environment:
+      MLFLOW_BACKEND_URI: "${MLFLOW_BACKEND_URI:-sqlite:////data/mlflow.db}"
+      MLFLOW_ARTIFACT_ROOT: "${MLFLOW_ARTIFACT_ROOT:-file:/data/artifacts}"
+    entrypoint: ["mlflow"]
+    command:
+      - server
+      - --host
+      - 0.0.0.0
+      - --port
+      - "5000"
+      - --backend-store-uri
+      - "${MLFLOW_BACKEND_URI:-sqlite:////data/mlflow.db}"
+      - --default-artifact-root
+      - "${MLFLOW_ARTIFACT_ROOT:-file:/data/artifacts}"
+      - --allowed-hosts
+      - "${MLFLOW_ALLOWED_HOSTS:-localhost:*,127.0.0.1:*,mlflow:*}"
+      - --cors-allowed-origins
+      - "${MLFLOW_CORS_ALLOWED_ORIGINS:-http://localhost:5000,http://127.0.0.1:5000}"
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+        required: false
+
+  postgres:
+    profiles: ["pg"]
+    image: postgres:16
+    <<: *restart_policy
+    environment:
+      POSTGRES_USER: "${POSTGRES_USER:-mlflow}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-mlflow}"
+      POSTGRES_DB: "${POSTGRES_DB:-mlflow}"
+    volumes:
+      - "${POSTGRES_DATA_DIR:-${MLFLOW_DATA_DIR:-${HOME}/mlflow-data}/pgdata}:/var/lib/postgresql/data"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    # Keep Postgres private by default
+    # ports:
+    #   - "5432:5432"
+
+  mlflow-gc:
+    image: ghcr.io/mlflow/mlflow:latest
+    <<: *restart_policy
+    volumes: *mlflow_data_volume
+    depends_on:
+      mlflow:
+        condition: service_started
+    environment:
+      <<: *mlflow_default_env
+      MLFLOW_TRACKING_URI: "http://mlflow:5000"
+      MLFLOW_GC_INTERVAL_SECONDS: "${MLFLOW_GC_INTERVAL_SECONDS:-7200}"
+    command: >
+      sh -lc '
+      interval="$$MLFLOW_GC_INTERVAL_SECONDS";
+      case "$$interval" in (""|*[!0-9]*) interval=3600;; esac
+
+      while true; do
+        echo "[mlflow-gc] running mlflow gc";
+        printf "y\n" | mlflow gc \
+          --tracking-uri "$$MLFLOW_TRACKING_URI" \
+          --backend-store-uri "$$MLFLOW_BACKEND_URI" \
+          || true;
+
+        echo "[mlflow-gc] sleeping $$interval seconds";
+        sleep "$$interval";
+      done
+      '
