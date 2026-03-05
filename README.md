@@ -1,17 +1,61 @@
-# Minimal MLflow Tracking Server (Docker Compose)
+# Minimal [MLflow](https://mlflow.org/) Tracking Server (Docker Compose)
 
-This repository provides a **minimal, portable MLflow tracking server** that:
+A minimal, portable MLflow tracking server that:
 
 - defaults to **SQLite** (zero configuration)
 - optionally supports **PostgreSQL** (more robust backend)
-- works on **Linux and Windows (Docker Desktop)**
+- works on **Linux and Windows**
 - runs as a **long-lived service** (auto-restarts after reboot)
 - stores all data under **$HOME by default**
 - keeps PostgreSQL **private by default** (no LAN/WAN exposure)
+- runs **scheduled MLflow GC** and supports **on-demand GC** from anywhere
 
 ---
 
-## Architecture Overview
+## Quick start
+
+### 1) Install prerequisites
+- Install [Docker](https://docs.docker.com/get-docker/)
+- Install Git
+
+### 2) Clone the repository
+```bash
+git clone https://github.com/constatza/mlflow-server.git
+cd mlflow-server
+```
+
+### 3) Optional configuration
+If you want to change ports / allowed hosts / CORS / DB backend:
+
+```bash
+cp .env.example .env
+# edit .env
+```
+
+> Note: `.env` is intentionally not committed. Treat it as machine-local configuration (and secrets, if you enable Postgres auth).
+
+### 4) Start
+```bash
+docker compose up -d --build
+```
+
+> Note: `--build` is important because this repo adds two small GC helper commands (`loop` and `once`) into a custom image. That makes the on-demand GC command work consistently across OSes.
+
+### 5) Check status
+```bash
+docker compose ps
+```
+
+### 6) Run GC now (from anywhere)
+```bash
+docker exec -t mlflow-gc once
+```
+
+> Note: This intentionally uses `docker exec` instead of `docker compose exec/run` so you don’t need to be in the repo directory (and don’t need to care where the compose file lives).
+
+---
+
+## Architecture
 
 ```
 Client machines (Linux / Windows)
@@ -20,128 +64,97 @@ Client machines (Linux / Windows)
         v
 +-----------------------+
 |   MLflow Server       |  <-- exposed on port 5000
-|  (Docker container)   |
+|  (container)          |
 +-----------------------+
         |
-        |  internal Docker network
+        |  internal network
         v
 +-----------------------+
-| PostgreSQL (optional) |  <-- NOT exposed by default
-|  (Docker container)  |
+| Postgres (optional)   |  <-- NOT exposed by default
+|  (container)          |
 +-----------------------+
 
 Artifacts & DB files
 stored on host via bind mount
 ```
 
-### Key design principle
-**Clients talk only to MLflow.**  
-They never talk directly to PostgreSQL or the filesystem.
+---
+
+## Storage
+
+All persistent data is stored on the host via a bind mount:
+
+- Default: `${HOME}/.local/share/mlflow-server` (or `$XDG_DATA_HOME/mlflow-server` when set)
+- Override: set `MLFLOW_DATA_DIR`
+
+You’ll find:
+- `mlflow.db` (SQLite backend, default)
+- `artifacts/` (artifact store)
+- `pgdata/` (Postgres data dir, if enabled)
 
 ---
 
-## Service behavior
-
-This setup behaves like a system service:
-
-- starts with `docker compose up -d`
-- restarts on crashes
-- restarts automatically after machine reboot
-- stops only if you explicitly stop it
-
-This is achieved via:
-
-```yaml
-restart: unless-stopped
-```
-
-Docker itself must be configured to start on boot  
-(Linux default; Windows via Docker Desktop).
-
----
-
-## Storage model
-
-All persistent data lives on the host via a bind mount:
-
-```bash
-${MLFLOW_DATA_DIR: $XDG_DATA_HOME}
-```
-
-Contents:
-
-- `mlflow.db` — SQLite backend (default)
-- `artifacts/` — models, plots, checkpoints
-- `pgdata/` — PostgreSQL data directory (if enabled)
-
-s
-
----
-
-## SQLite vs PostgreSQL
+## SQLite vs Postgres
 
 ### SQLite (default)
-- single-user friendly
-- zero configuration
-- often *faster* for local, low-concurrency usage
-- stored as a single file
+Use this for local/single-node setups:
 
-Start:
 ```bash
-docker compose up -d
+docker compose up -d --build
 ```
 
-### PostgreSQL (optional)
-- more robust
-- better for concurrency
-- avoids SQLite locking issues on network filesystems
+### Postgres (optional)
+Enable the Postgres profile:
 
-Start:
 ```bash
-docker compose --profile pg up -d
+docker compose --profile pg up -d --build
 ```
+
+> Note: Postgres is recommended when you have concurrent writers, shared usage, or want DB-grade ops (backups, tuning, migrations).
 
 ---
 
-## Configuration files
+## Garbage collection (GC)
 
-### `docker-compose.yml`
-- committed
-- defines the application
+This stack runs GC in a dedicated sidecar container (`mlflow-gc`):
 
-### `.env.example`
-- committed
-- documents configuration options
-- contains **placeholders only**
+- **Scheduled GC**: runs every `MLFLOW_GC_INTERVAL_SECONDS` (default: `86400`, once/day)
+- **On-demand GC**: run immediately with:
+  ```bash
+  docker exec -t mlflow-gc once
+  ```
 
-### `.env`
-- per-machine
-- contains real values
-- **must remain private for security**
+> Note: GC is split into a separate container to keep the server process simple and to allow independent restarts/behavior without mixing multiple long-lived processes in one container.
 
 ---
 
-## Typical workflows
+## Single-instance disclaimer (intentional)
 
-### Single machine, minimal
+The GC container name is pinned to `mlflow-gc` so you can always run:
+
 ```bash
-docker compose up -d
+docker exec -t mlflow-gc once
 ```
 
-### PostgreSQL backend
-```bash
-cp .env.example .env
-# edit .env
-docker compose --profile pg up -d
-```
+> Note: Pinning a container name means you can’t run a second copy of the stack on the same host without changing/removing that name. This repo optimizes for the “one MLflow instance per host” workflow.
 
-### Check status
+---
+
+## Common operations
+
+### Start / stop
 ```bash
-docker compose ps
+docker compose up -d --build
+docker compose down
 ```
 
 ### Logs
 ```bash
-docker compose logs -f
+docker compose logs -f --tail=200
 ```
 
+### Update
+```bash
+docker compose pull
+docker compose up -d --build
+```

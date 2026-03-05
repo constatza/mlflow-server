@@ -1,0 +1,8 @@
+FROM ghcr.io/mlflow/mlflow:latest
+
+COPY ops/loop.sh /usr/local/bin/loop
+COPY ops/once.sh /usr/local/bin/once
+
+RUN chmod +x /usr/local/bin/loop /usr/local/bin/once
+
+ENTRYPOINT ["mlflow"]
