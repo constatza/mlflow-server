@@ -7,6 +7,7 @@ A minimal, portable MLflow tracking server that:
 - works on **Linux and Windows**
 - runs as a **long-lived service** (auto-restarts after reboot)
 - stores all data under **$HOME by default**
+- lets the **server manage artifact uploads/downloads** for new experiments
 - keeps PostgreSQL **private by default** (no LAN/WAN exposure)
 - runs **scheduled MLflow GC** and supports **on-demand GC** from anywhere
 
@@ -25,7 +26,7 @@ cd mlflow-server
 ```
 
 ### 3) Optional configuration
-If you want to change ports / allowed hosts / CORS / DB backend:
+If you want to change ports, allowed hosts, DB backend, or artifact storage:
 
 ```bash
 cp .env.example .env
@@ -82,15 +83,52 @@ stored on host via bind mount
 
 ## Storage
 
-All persistent data is stored on the host via a bind mount:
+All persistent data is stored on the host via a bind mount. By default:
 
 - Default: `${HOME}/.local/share/mlflow-server` (or `$XDG_DATA_HOME/mlflow-server` when set)
 - Override: set `MLFLOW_DATA_DIR`
 
 You’ll find:
 - `mlflow.db` (SQLite backend, default)
-- `artifacts/` (artifact store)
+- `artifacts/` (server-managed artifact store for new experiments)
 - `pgdata/` (Postgres data dir, if enabled)
+
+For new experiments, the tracking server proxies artifact uploads/downloads and writes them to
+`MLFLOW_ARTIFACTS_DESTINATION` (default: `file:/data/artifacts`). Clients only need
+`MLFLOW_TRACKING_URI`; they do not need direct access to the underlying artifact filesystem or S3 bucket.
+
+Important: MLflow stores the artifact location on each experiment when the experiment is created.
+Existing experiments keep their old artifact root and are considered legacy. After switching to this
+server-managed setup, create new experiments if you want fully proxied artifact handling and GC.
+
+### Custom artifact storage
+
+The artifact destination is configurable with a single setting:
+
+- Local default: `MLFLOW_ARTIFACTS_DESTINATION=file:/data/artifacts`
+- Another mounted drive: `MLFLOW_ARTIFACTS_DESTINATION=file:/data/external-artifacts`
+- S3: `MLFLOW_ARTIFACTS_DESTINATION=s3://my-bucket/mlflow-artifacts`
+
+For another local drive, either:
+
+- set `MLFLOW_DATA_DIR` to a path on that drive if you want DB and artifacts to move together, or
+- change the bind mount in `docker-compose.yml` and point `MLFLOW_ARTIFACTS_DESTINATION` at the container path you mounted
+
+For S3, set `MLFLOW_ARTIFACTS_DESTINATION=s3://...` and provide AWS credentials to both the
+`mlflow` and `mlflow-gc` containers, for example via `.env`:
+
+```bash
+MLFLOW_ARTIFACTS_DESTINATION=s3://my-bucket/mlflow-artifacts
+AWS_ACCESS_KEY_ID=...
+AWS_SECRET_ACCESS_KEY=...
+AWS_DEFAULT_REGION=us-east-1
+```
+
+If you use an S3-compatible endpoint such as MinIO, also set:
+
+```bash
+MLFLOW_S3_ENDPOINT_URL=https://minio.example.internal
+```
 
 ---
 
@@ -125,6 +163,11 @@ This stack runs GC in a dedicated sidecar container (`mlflow-gc`):
   ```
 
 > Note: GC is split into a separate container to keep the server process simple and to allow independent restarts/behavior without mixing multiple long-lived processes in one container.
+
+For new proxied experiments, GC can resolve artifact URIs through the tracking server and delete
+artifacts as part of permanent cleanup. Legacy experiments that were created with direct
+`file:///...`, `s3://...`, or other pre-existing artifact roots keep those locations and are not
+automatically migrated by this repo.
 
 ---
 
