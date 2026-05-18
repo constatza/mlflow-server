@@ -1,19 +1,14 @@
 # docker-compose.yml
 #
-# Final (works with EMPTY .env):
-# - Safe defaults: localhost-only via MLflow 3.x security middleware
-# - Optional widening via .env (MLFLOW_ALLOWED_HOSTS / MLFLOW_CORS_ALLOWED_ORIGINS)
-# - SQLite backend + proxied local artifacts under /data by default
-# - Optional Postgres via profile "pg"
-# - Daily GC by default (MLFLOW_GC_INTERVAL_SECONDS defaults to 86400)
+# Storage layout:
+# - mlflow.db  → Docker named volume (mlflow-server-db); always available on Docker startup,
+#                no dependency on the WSL2/host filesystem being initialized.
+# - artifacts  → host bind mount; set MLFLOW_ARTIFACTS_DIR in .env (or .env.local).
 #
-# Notes:
-# - Compose substitutes ${VARS} from host env/.env BEFORE anchors expand.
-
-x-mlflow-data-volume: &mlflow_data_volume
-  # XDG-friendly default (Linux):
-  # Uses $XDG_DATA_HOME when set, otherwise falls back to ~/.local/share
-  - "${MLFLOW_DATA_DIR:-${XDG_DATA_HOME:-${HOME}/.local/share}/mlflow-server}:/data"
+# Safe defaults: localhost-only via MLflow 3.x security middleware.
+# Optional widening via .env (MLFLOW_ALLOWED_HOSTS / MLFLOW_CORS_ALLOWED_ORIGINS).
+# Optional Postgres backend via profile "pg".
+# Daily GC by default (MLFLOW_GC_INTERVAL_SECONDS defaults to 86400).
 
 x-restart-policy: &restart_policy
   restart: unless-stopped
@@ -31,8 +26,7 @@ x-aws-env: &aws_env
   MLFLOW_S3_ENDPOINT_URL: "${MLFLOW_S3_ENDPOINT_URL:-}"
 
 x-mlflow-default-env: &mlflow_default_env
-  # Storage defaults (available inside containers)
-  MLFLOW_BACKEND_URI: "${MLFLOW_BACKEND_URI:-sqlite:////data/mlflow.db}"
+  MLFLOW_BACKEND_URI: "${MLFLOW_BACKEND_URI:-sqlite:////data/db/mlflow.db?timeout=30&journal_mode=WAL}"
   MLFLOW_ARTIFACTS_DESTINATION: "${MLFLOW_ARTIFACTS_DESTINATION:-file:/data/artifacts}"
   <<: *aws_env
 
@@ -42,8 +36,10 @@ services:
       context: .
       dockerfile: ops/Dockerfile.mlflow-gc
     restart: unless-stopped
+    stop_grace_period: 30s
     volumes:
-      *mlflow_data_volume
+      - db:/data/db
+      - "${MLFLOW_ARTIFACTS_DIR:-${MLFLOW_DATA_DIR:-${XDG_DATA_HOME:-${HOME}/.local/share}/mlflow-server}/artifacts}:/data/artifacts"
     ports:
       - "${MLFLOW_PORT:-5000}:5000"
     environment:
@@ -56,14 +52,19 @@ services:
       - --port
       - "5000"
       - --backend-store-uri
-      - "${MLFLOW_BACKEND_URI:-sqlite:////data/mlflow.db}"
+      - "${MLFLOW_BACKEND_URI:-sqlite:////data/db/mlflow.db?timeout=30&journal_mode=WAL}"
       - --artifacts-destination
       - "${MLFLOW_ARTIFACTS_DESTINATION:-file:/data/artifacts}"
       - --allowed-hosts
       - "${MLFLOW_ALLOWED_HOSTS:-localhost:*,127.0.0.1:*,mlflow:*}"
       - --cors-allowed-origins
       - "${MLFLOW_CORS_ALLOWED_ORIGINS:-http://localhost:5000,http://127.0.0.1:5000}"
-
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
     depends_on:
       postgres:
         condition: service_healthy
@@ -71,14 +72,14 @@ services:
 
   postgres:
     profiles: ["pg"]
-    image: postgres:16
+    image: postgres:16.9
     <<: *restart_policy
     environment:
       POSTGRES_USER: "${POSTGRES_USER:-mlflow}"
       POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-mlflow}"
       POSTGRES_DB: "${POSTGRES_DB:-mlflow}"
     volumes:
-      - "${POSTGRES_DATA_DIR:-${MLFLOW_DATA_DIR:-${HOME}/mlflow-data}/pgdata}:/var/lib/postgresql/data"
+      - "${POSTGRES_DATA_DIR:-${MLFLOW_DATA_DIR:-${XDG_DATA_HOME:-${HOME}/.local/share}/mlflow-server}/pgdata}:/var/lib/postgresql/data"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
       interval: 5s
@@ -96,12 +97,21 @@ services:
       context: .
       dockerfile: ops/Dockerfile.mlflow-gc
     <<: *restart_policy
-    volumes: *mlflow_data_volume
+    volumes:
+      - db:/data/db
+      - "${MLFLOW_ARTIFACTS_DIR:-${MLFLOW_DATA_DIR:-${XDG_DATA_HOME:-${HOME}/.local/share}/mlflow-server}/artifacts}:/data/artifacts"
     depends_on:
       mlflow:
-        condition: service_started
+        condition: service_healthy
     environment:
       <<: *mlflow_default_env
-      MLFLOW_TRACKING_URI: "http://mlflow:5000"
+      MLFLOW_TRACKING_URI: "http://mlflow:${MLFLOW_PORT:-5000}"
       MLFLOW_GC_INTERVAL_SECONDS: "${MLFLOW_GC_INTERVAL_SECONDS:-86400}"
     entrypoint: ["/usr/local/bin/loop"]
+
+volumes:
+  db:
+    name: mlflow-server-db
+    # Pure Docker-managed volume for mlflow.db.
+    # Stored inside Docker Desktop's own VHD — always available on container
+    # startup regardless of WSL2 / host filesystem initialization state.
