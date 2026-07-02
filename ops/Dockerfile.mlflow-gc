@@ -5,4 +5,4 @@ COPY ops/once.sh /usr/local/bin/once
 
 RUN chmod +x /usr/local/bin/loop /usr/local/bin/once
 
-ENTRYPOINT ["mlflow"]
+ENTRYPOINT ["/usr/local/bin/loop"]
