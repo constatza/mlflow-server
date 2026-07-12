@@ -30,9 +30,30 @@ x-mlflow-default-env: &mlflow_default_env
   MLFLOW_ARTIFACTS_DESTINATION: "${MLFLOW_ARTIFACTS_DESTINATION:-file:/data/artifacts}"
   <<: *aws_env
 
+x-mlflow-runtime-user: &mlflow_runtime_user "${MLFLOW_RUN_UID:-${HOST_UID:-1000}}:${MLFLOW_RUN_GID:-${HOST_GID:-1000}}"
+
 services:
+  mlflow-init:
+    image: ghcr.io/mlflow/mlflow:latest
+    restart: "no"
+    user: "0:0"
+    volumes:
+      - db:/data/db
+      - "${MLFLOW_ARTIFACTS_DIR:-${XDG_DATA_HOME:-${HOME}/.local/share}/mlflow-server/artifacts}:/data/artifacts"
+    environment:
+      MLFLOW_RUN_UID: "${MLFLOW_RUN_UID:-${HOST_UID:-1000}}"
+      MLFLOW_RUN_GID: "${MLFLOW_RUN_GID:-${HOST_GID:-1000}}"
+    command:
+      - sh
+      - -eu
+      - -c
+      - |
+        mkdir -p /data/db /data/artifacts
+        chown -R "${MLFLOW_RUN_UID:-${HOST_UID:-1000}}:${MLFLOW_RUN_GID:-${HOST_GID:-1000}}" /data/db
+
   mlflow:
     image: ghcr.io/mlflow/mlflow:latest
+    user: *mlflow_runtime_user
     restart: unless-stopped
     stop_grace_period: 30s
     volumes:
@@ -64,6 +85,8 @@ services:
       retries: 12
       start_period: 20s
     depends_on:
+      mlflow-init:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
         required: false
@@ -94,6 +117,7 @@ services:
     build:
       context: .
       dockerfile: ops/Dockerfile.mlflow-gc
+    user: *mlflow_runtime_user
     <<: *restart_policy
     stop_grace_period: 30s
     volumes:

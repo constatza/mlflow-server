@@ -65,6 +65,8 @@ cp .env.example .env.local
 | `MLFLOW_PORT` | `5000` | Port exposed on the host |
 | `MLFLOW_BACKEND_URI` | `sqlite:////data/db/mlflow.db` | Tracking store URI |
 | `MLFLOW_ARTIFACTS_DESTINATION` | `file:/data/artifacts` | Artifact root inside the server |
+| `MLFLOW_RUN_UID` | invoking user via `make` | Numeric UID for the MLflow server and GC sidecar |
+| `MLFLOW_RUN_GID` | invoking group via `make` | Numeric GID for the MLflow server and GC sidecar |
 | `MLFLOW_ALLOWED_HOSTS` | `localhost:*,127.0.0.1:*,mlflow:*` | MLflow 3.x host header allowlist |
 | `MLFLOW_CORS_ALLOWED_ORIGINS` | `http://localhost:5000,…` | CORS origins for the UI |
 | `MLFLOW_GC_INTERVAL_SECONDS` | `86400` | Seconds between scheduled GC runs |
@@ -99,6 +101,15 @@ Recovery commands are in the [Upgrading](#upgrading) section.
 | Postgres data | `$POSTGRES_DATA_DIR` on the host (Postgres profile only) |
 
 > **Warning:** `docker compose down -v` and `docker system prune -v` destroy the DB volume. The Makefile `down` target intentionally omits `-v`.
+
+The MLflow server and GC sidecar run as the host user's numeric UID/GID when
+started through `make`. A short `mlflow-init` container runs as root first to
+create the mounted data directories and hand ownership of the DB volume to
+that UID/GID. It does not chown the artifacts directory — that's a host bind
+mount, so a fresh directory is already owned by you. If you have artifacts
+left over from before this change (written as root) or set `MLFLOW_RUN_UID`/
+`MLFLOW_RUN_GID` to something other than your own user, fix ownership once
+yourself: `chown -R "$(id -u):$(id -g)" "$MLFLOW_ARTIFACTS_DIR"`.
 
 ### Artifact path
 
