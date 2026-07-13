@@ -17,9 +17,12 @@ endef
 init:
 	$(COMPOSE) run --rm mlflow-init
 
-## Build images and start all services.
+## Build images and (re)start all services, always matching the current .env config.
+## --force-recreate guarantees this even if only .env/.env.local changed (e.g. a
+## storage path) and containers were left running from before that change --
+## otherwise they'd keep their stale bind mounts indefinitely.
 up:
-	$(COMPOSE) up -d --build --pull always
+	$(COMPOSE) up -d --build --pull always --force-recreate
 
 ## Stop and remove containers (data is preserved).
 down:
