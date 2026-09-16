@@ -14,6 +14,15 @@
 # Optional widening via .env (MLFLOW_ALLOWED_HOSTS / MLFLOW_CORS_ALLOWED_ORIGINS).
 # Optional Postgres backend via profile "pg".
 # Daily GC by default (MLFLOW_GC_INTERVAL_SECONDS defaults to 86400).
+#
+# Self-healing:
+# - mlflow's healthcheck actually opens the sqlite DB (MLflow's own /health route
+#   is a hardcoded 200, it never touches the DB, so it can't detect a broken
+#   backend store on its own).
+# - Docker's restart policy only triggers on the main process exiting, never on
+#   a healthcheck going "unhealthy" -- so a broken-but-still-running container
+#   would otherwise sit unhealthy forever. The "autoheal" sidecar watches health
+#   status via the Docker socket and force-restarts anything unhealthy.
 
 x-restart-policy: &restart_policy
   restart: unless-stopped
@@ -61,6 +70,8 @@ services:
     user: *mlflow_runtime_user
     restart: unless-stopped
     stop_grace_period: 30s
+    labels:
+      - autoheal=true
     volumes:
       - "${MLFLOW_DB_DIR:-${XDG_DATA_HOME:-${HOME}/.local/share}/mlflow-server/db}:/data/db"
       - "${MLFLOW_ARTIFACTS_DIR:-${XDG_DATA_HOME:-${HOME}/.local/share}/mlflow-server/artifacts}:/data/artifacts"
@@ -84,10 +95,13 @@ services:
       - --cors-allowed-origins
       - "${MLFLOW_CORS_ALLOWED_ORIGINS:-http://localhost:5000,http://127.0.0.1:5000}"
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/health')"]
+      # Checks the actual sqlite backend, not just process liveness --
+      # MLflow's own /health route is a hardcoded 200 regardless of DB state.
+      # If you switch to the "pg" profile, point this at postgres instead.
+      test: ["CMD", "python", "-c", "import sqlite3; sqlite3.connect('file:/data/db/mlflow.db?mode=rw', uri=True).execute('select 1')"]
       interval: 10s
       timeout: 5s
-      retries: 12
+      retries: 3
       start_period: 20s
     depends_on:
       mlflow-init:
@@ -136,3 +150,16 @@ services:
       MLFLOW_TRACKING_URI: "http://mlflow:${MLFLOW_PORT:-5000}"
       MLFLOW_GC_INTERVAL_SECONDS: "${MLFLOW_GC_INTERVAL_SECONDS:-86400}"
     entrypoint: ["/usr/local/bin/loop"]
+
+  autoheal:
+    # Force-restarts any container labeled autoheal=true once Docker marks it
+    # unhealthy. Needed because Docker's own restart policy never acts on
+    # healthcheck failures, only on the process exiting.
+    # NOTE: needs the Docker socket -- effectively root-on-host access for
+    # this container.
+    image: willfarrell/autoheal:latest
+    restart: unless-stopped
+    environment:
+      AUTOHEAL_CONTAINER_LABEL: autoheal
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
