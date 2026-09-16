@@ -112,14 +112,16 @@ services:
 
   postgres:
     profiles: ["pg"]
-    image: postgres:16.9
+    image: postgres:18.6
     <<: *restart_policy
     environment:
       POSTGRES_USER: "${POSTGRES_USER:-mlflow}"
       POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-mlflow}"
       POSTGRES_DB: "${POSTGRES_DB:-mlflow}"
     volumes:
-      - "${POSTGRES_DATA_DIR:-${XDG_DATA_HOME:-${HOME}/.local/share}/mlflow-server/pgdata}:/var/lib/postgresql/data"
+      # Postgres 18+ moved PGDATA to a versioned subdir and declares its VOLUME
+      # at the parent /var/lib/postgresql (was .../data on 17 and earlier).
+      - "${POSTGRES_DATA_DIR:-${XDG_DATA_HOME:-${HOME}/.local/share}/mlflow-server/pgdata}:/var/lib/postgresql"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
       interval: 5s
